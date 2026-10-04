@@ -18,7 +18,9 @@ def parse_song_item(item):
 
     # Stream URL Extraction (High Quality 320kbps Audio)
     stream_url = ""
-    preview = item.get('media_preview_url') or (item.get('more_info', {}).get('media_preview_url') if isinstance(item.get('more_info'), dict) else "")
+    more_info = item.get('more_info', {}) if isinstance(item.get('more_info'), dict) else {}
+    
+    preview = item.get('media_preview_url') or more_info.get('media_preview_url') or ""
     if preview and 'saavncdn.com' in preview:
         stream_url = preview.replace('preview.saavncdn.com', 'aac.saavncdn.com').replace('_96_p.mp4', '_320.mp4').replace('_96_p.mp3', '_320.mp3')
 
@@ -46,7 +48,6 @@ def parse_song_item(item):
         image_url = images.replace('150x150', '500x500').replace('50x50', '500x500')
 
     # Artist Extraction
-    more_info = item.get('more_info', {}) if isinstance(item.get('more_info'), dict) else {}
     artist = ""
     if 'artistMap' in more_info and isinstance(more_info['artistMap'], dict):
         prim = more_info['artistMap'].get('primary_artists', [])
@@ -73,15 +74,20 @@ def parse_song_item(item):
         "duration": item.get('duration', 0)
     }
 
-def fetch_jiosaavn_official(query):
+def fetch_jiosaavn_songs(query):
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
         'Accept': 'application/json, text/plain, */*',
-        'Accept-Language': 'en-US,en;q=0.9',
         'Referer': 'https://www.jiosaavn.com/'
     }
     
-    # 1. Official JioSaavn search.getResults API
+    # Language Cookie Fix (JioSaavn requires language cookies to return tracks)
+    cookies = {
+        'L': 'hindi,english,punjabi,telugu,tamil',
+        'gdpr_acceptance': 'true'
+    }
+
+    # 1. Primary Method: Official JioSaavn search.getResults
     try:
         url = "https://www.jiosaavn.com/api.php"
         params = {
@@ -94,21 +100,17 @@ def fetch_jiosaavn_official(query):
             'p': '1',
             'n': '30'
         }
-        res = requests.get(url, params=params, headers=headers, timeout=8)
+        res = requests.get(url, params=params, headers=headers, cookies=cookies, timeout=8)
         if res.status_code == 200:
             data = res.json()
             results = data.get('results', [])
-            songs = []
-            for item in results:
-                parsed = parse_song_item(item)
-                if parsed:
-                    songs.append(parsed)
+            songs = [parse_song_item(item) for item in results if parse_song_item(item)]
             if songs:
                 return songs
     except Exception:
         pass
 
-    # 2. Official JioSaavn autocomplete.get API
+    # 2. Secondary Method: Official JioSaavn autocomplete.get
     try:
         url = "https://www.jiosaavn.com/api.php"
         params = {
@@ -119,15 +121,11 @@ def fetch_jiosaavn_official(query):
             'ctx': 'web6dot0',
             'query': query
         }
-        res = requests.get(url, params=params, headers=headers, timeout=8)
+        res = requests.get(url, params=params, headers=headers, cookies=cookies, timeout=8)
         if res.status_code == 200:
             data = res.json()
             songs_data = data.get('songs', {}).get('data', []) if isinstance(data.get('songs'), dict) else []
-            songs = []
-            for item in songs_data:
-                parsed = parse_song_item(item)
-                if parsed:
-                    songs.append(parsed)
+            songs = [parse_song_item(item) for item in songs_data if parse_song_item(item)]
             if songs:
                 return songs
     except Exception:
@@ -149,7 +147,7 @@ def search_songs():
     if not query:
         return jsonify({"status": "error", "message": "Search query missing"}), 400
 
-    songs = fetch_jiosaavn_official(query)
+    songs = fetch_jiosaavn_songs(query)
     if songs:
         return jsonify({"status": "success", "count": len(songs), "results": songs})
 
@@ -159,7 +157,7 @@ def search_songs():
 def artist_top_hits():
     artist_name = request.args.get('name', 'Arijit Singh')
     
-    songs = fetch_jiosaavn_official(artist_name)
+    songs = fetch_jiosaavn_songs(artist_name)
     if songs:
         return jsonify({"status": "success", "artist": artist_name, "count": len(songs), "results": songs})
 
