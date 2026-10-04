@@ -7,56 +7,48 @@ import re
 app = Flask(__name__)
 CORS(app)
 
-# Initialize Official YouTube Music Engine
+# Initialize YouTube Music Engine
 try:
     from ytmusicapi import YTMusic
     ytmusic = YTMusic()
 except Exception:
     ytmusic = None
 
-def get_audio_stream_url(video_id):
-    piped_instances = [
-        "https://pipedapi.kavin.rocks",
-        "https://api.piped.video",
-        "https://pipedapi.drgns.space",
-        "https://pipedapi.mha.fi",
-        "https://pipedapi.astrobot.me",
-        "https://pipedapi.privacy.com.de"
-    ]
-    for base_url in piped_instances:
+PIPED_INSTANCES = [
+    "https://pipedapi.kavin.rocks",
+    "https://api.piped.video",
+    "https://pipedapi.drgns.space",
+    "https://pipedapi.mha.fi",
+    "https://pipedapi.astrobot.me",
+    "https://pipedapi.privacy.com.de"
+]
+
+def get_direct_https_stream(video_id):
+    # Direct HTTPS audio stream fetcher
+    for base_url in PIPED_INSTANCES:
         try:
             url = f"{base_url}/streams/{video_id}"
-            res = requests.get(url, timeout=3)
+            res = requests.get(url, timeout=4)
             if res.status_code == 200:
                 audio_streams = res.json().get('audioStreams', [])
                 if audio_streams and isinstance(audio_streams, list):
-                    return audio_streams[-1].get('url')
+                    stream_url = audio_streams[-1].get('url', '')
+                    if stream_url and stream_url.startswith('http:'):
+                        stream_url = stream_url.replace('http:', 'https:', 1)
+                    if stream_url:
+                        return stream_url
         except Exception:
             continue
             
-    # Direct Invidious fallback audio stream (M4A AAC 128kbps/320kbps)
-    invidious_nodes = [
-        f"https://invidious.nerdvpn.de/latest_version?id={video_id}&itag=140",
-        f"https://inv.tux.pizza/latest_version?id={video_id}&itag=140",
-        f"https://invidious.drgns.space/latest_version?id={video_id}&itag=140",
-        f"https://yt.drgnz.club/latest_version?id={video_id}&itag=140"
-    ]
-    for node in invidious_nodes:
-        try:
-            res = requests.head(node, timeout=2)
-            if res.status_code in [200, 302]:
-                return node
-        except Exception:
-            continue
-
+    # Fallback HTTPS node
     return f"https://invidious.nerdvpn.de/latest_version?id={video_id}&itag=140"
 
 @app.route('/')
 def home():
     return jsonify({
         "status": "online",
-        "app": "SonicFlow Backend Engine v2 (YouTube Music Full-Length)",
-        "message": "Full Length Songs Engine is running smoothly!"
+        "app": "SonicFlow Backend Engine v2 (HTTPS Direct Stream)",
+        "message": "Full-Length HTTPS Audio Engine is running smoothly!"
     })
 
 @app.route('/stream')
@@ -65,14 +57,14 @@ def stream_audio():
     if not video_id:
         return jsonify({"status": "error", "message": "Video ID missing"}), 400
         
-    stream_url = get_audio_stream_url(video_id)
+    stream_url = get_direct_https_stream(video_id)
     return redirect(stream_url, code=302)
 
-def search_ytmusic_official(query):
+def search_ytmusic(query):
     songs = []
     if ytmusic:
         try:
-            results = ytmusic.search(query, filter="songs", limit=30)
+            results = ytmusic.search(query, filter="songs", limit=25)
             for item in results:
                 vid = item.get("videoId")
                 if not vid:
@@ -89,11 +81,13 @@ def search_ytmusic_official(query):
                 if isinstance(thumbnails, list) and len(thumbnails) > 0:
                     image_url = thumbnails[-1].get("url", "")
                     image_url = re.sub(r'=w\d+-h\d+', '=w500-h500', image_url)
-                
+                if image_url.startswith('http:'):
+                    image_url = image_url.replace('http:', 'https:', 1)
+
                 duration = item.get("duration_seconds") or 0
                 
-                host_url = request.host_url.rstrip('/')
-                stream_link = f"{host_url}/stream?id={vid}"
+                # Fetch direct HTTPS Audio Stream Link
+                stream_link = get_direct_https_stream(vid)
                 
                 songs.append({
                     "id": vid,
@@ -108,58 +102,13 @@ def search_ytmusic_official(query):
             print("ytmusic search error:", e)
     return songs
 
-def search_piped_fallback(query):
-    songs = []
-    piped_instances = [
-        "https://pipedapi.kavin.rocks",
-        "https://api.piped.video",
-        "https://pipedapi.drgns.space"
-    ]
-    host_url = request.host_url.rstrip('/')
-    
-    for base_url in piped_instances:
-        try:
-            res = requests.get(f"{base_url}/search", params={"q": query, "filter": "music_songs"}, timeout=5)
-            if res.status_code == 200:
-                items = res.json().get("items", [])
-                for item in items:
-                    url = item.get("url", "")
-                    vid = url.replace("/watch?v=", "") if "/watch?v=" in url else ""
-                    if not vid:
-                        continue
-                    
-                    title = item.get("title", "Unknown Song")
-                    artist = item.get("uploaderName", "Unknown Artist")
-                    image = item.get("thumbnail", "")
-                    duration = item.get("duration", 0)
-                    
-                    stream_link = f"{host_url}/stream?id={vid}"
-                    
-                    songs.append({
-                        "id": vid,
-                        "title": title,
-                        "artist": artist,
-                        "album": "",
-                        "image": image,
-                        "stream_url": stream_link,
-                        "duration": duration
-                    })
-                if songs:
-                    break
-        except Exception:
-            continue
-    return songs
-
 @app.route('/search', methods=['GET'])
 def search_songs():
     query = request.args.get('q', '') or request.args.get('query', '')
     if not query:
         return jsonify({"status": "error", "message": "Search query missing"}), 400
 
-    songs = search_ytmusic_official(query)
-    if not songs:
-        songs = search_piped_fallback(query)
-
+    songs = search_ytmusic(query)
     if songs:
         return jsonify({"status": "success", "count": len(songs), "results": songs})
 
