@@ -12,33 +12,53 @@ def clean_text(text):
         return ''
     return html.unescape(re.sub(r'<[^>]+>', '', str(text)))
 
+def extract_stream_url(item):
+    if not isinstance(item, dict):
+        return ""
+    
+    more_info = item.get('more_info')
+    if not isinstance(more_info, dict):
+        more_info = {}
+
+    # 1. Preview URL to 320kbps HD audio transformation
+    preview = item.get('media_preview_url') or more_info.get('media_preview_url') or item.get('preview_url') or ""
+    if isinstance(preview, str) and 'saavncdn.com' in preview:
+        url = preview.replace('preview.saavncdn.com', 'aac.saavncdn.com')
+        url = url.replace('_96_p.mp4', '_320.mp4').replace('_96_p.mp3', '_320.mp3')
+        url = url.replace('_96_p', '_320.mp4')
+        return url
+
+    # 2. downloadUrl / download_url list
+    download_urls = item.get('downloadUrl') or item.get('download_url') or item.get('downloadUrls') or more_info.get('downloadUrl') or []
+    if isinstance(download_urls, list) and len(download_urls) > 0:
+        last = download_urls[-1]
+        if isinstance(last, dict):
+            return last.get('url', '') or last.get('link', '')
+        return str(last)
+    elif isinstance(download_urls, str) and download_urls.startswith('http'):
+        return download_urls
+
+    # 3. Direct media_url
+    media_url = item.get('media_url') or more_info.get('media_url')
+    if isinstance(media_url, str) and media_url.startswith('http'):
+        return media_url
+
+    return ""
+
 def parse_song_item(item):
     if not isinstance(item, dict):
         return None
 
-    # Stream URL Extraction (High Quality 320kbps Audio)
-    stream_url = ""
-    more_info = item.get('more_info', {}) if isinstance(item.get('more_info'), dict) else {}
-    
-    preview = item.get('media_preview_url') or more_info.get('media_preview_url') or ""
-    if preview and 'saavncdn.com' in preview:
-        stream_url = preview.replace('preview.saavncdn.com', 'aac.saavncdn.com').replace('_96_p.mp4', '_320.mp4').replace('_96_p.mp3', '_320.mp3')
-
-    if not stream_url:
-        dl = item.get('downloadUrl') or item.get('download_url') or item.get('downloadUrls') or []
-        if isinstance(dl, list) and len(dl) > 0:
-            last = dl[-1]
-            stream_url = last.get('url', '') if isinstance(last, dict) else str(last)
-        elif isinstance(dl, str):
-            stream_url = dl
-
-    if not stream_url and isinstance(item.get('media_url'), str):
-        stream_url = item.get('media_url')
-
+    stream_url = extract_stream_url(item)
     if not stream_url:
         return None
 
-    # Image Extraction
+    more_info = item.get('more_info')
+    if not isinstance(more_info, dict):
+        more_info = {}
+
+    title = clean_text(item.get('title') or item.get('name') or item.get('song') or "Unknown Song")
+
     image_url = ""
     images = item.get('image') or item.get('images') or []
     if isinstance(images, list) and len(images) > 0:
@@ -47,21 +67,20 @@ def parse_song_item(item):
     elif isinstance(images, str):
         image_url = images.replace('150x150', '500x500').replace('50x50', '500x500')
 
-    # Artist Extraction
     artist = ""
     if 'artistMap' in more_info and isinstance(more_info['artistMap'], dict):
         prim = more_info['artistMap'].get('primary_artists', [])
         if prim and isinstance(prim, list):
             artist = ", ".join([a.get('name', '') for a in prim if isinstance(a, dict) and a.get('name')])
     if not artist:
-        artists_data = item.get('artists', {})
-        prim = artists_data.get('primary', []) if isinstance(artists_data, dict) else []
-        if prim and isinstance(prim, list):
-            artist = ", ".join([a.get('name', '') for a in prim if isinstance(a, dict) and a.get('name')])
+        artists_data = item.get('artists')
+        if isinstance(artists_data, dict):
+            prim = artists_data.get('primary', [])
+            if isinstance(prim, list):
+                artist = ", ".join([a.get('name', '') for a in prim if isinstance(a, dict) and a.get('name')])
     if not artist:
-        artist = item.get('primaryArtists') or item.get('artist') or item.get('singers') or item.get('subtitle') or "Unknown Artist"
+        artist = item.get('primaryArtists') or item.get('artist') or item.get('singers') or item.get('subtitle') or more_info.get('singers') or "Unknown Artist"
 
-    title = clean_text(item.get('name') or item.get('title') or item.get('song') or "Unknown Song")
     album_name = clean_text(more_info.get('album') or (item.get('album', {}).get('name', '') if isinstance(item.get('album'), dict) else str(item.get('album', ''))))
 
     return {
@@ -71,23 +90,47 @@ def parse_song_item(item):
         "album": album_name,
         "image": image_url,
         "stream_url": stream_url,
-        "duration": item.get('duration', 0)
+        "duration": item.get('duration', 0) or more_info.get('duration', 0)
     }
 
-def fetch_jiosaavn_songs(query):
+def extract_songs_from_response(data):
+    results = []
+    if isinstance(data, dict):
+        if 'results' in data and isinstance(data['results'], list):
+            results = data['results']
+        elif 'songs' in data and isinstance(data['songs'], dict) and 'data' in data['songs']:
+            results = data['songs']['data']
+        elif 'data' in data:
+            if isinstance(data['data'], dict):
+                if 'results' in data['data'] and isinstance(data['data']['results'], list):
+                    results = data['data']['results']
+                elif 'songs' in data['data'] and isinstance(data['data']['songs'], list):
+                    results = data['data']['songs']
+            elif isinstance(data['data'], list):
+                results = data['data']
+    elif isinstance(data, list):
+        results = data
+
+    songs = []
+    for item in results:
+        parsed = parse_song_item(item)
+        if parsed:
+            songs.append(parsed)
+    return songs
+
+def fetch_songs_multi_strategy(query):
     headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
         'Accept': 'application/json, text/plain, */*',
+        'Accept-Language': 'en-US,en;q=0.9',
         'Referer': 'https://www.jiosaavn.com/'
     }
-    
-    # Language Cookie Fix (JioSaavn requires language cookies to return tracks)
     cookies = {
         'L': 'hindi,english,punjabi,telugu,tamil',
         'gdpr_acceptance': 'true'
     }
 
-    # 1. Primary Method: Official JioSaavn search.getResults
+    # Strategy 1: Official JioSaavn Web Search
     try:
         url = "https://www.jiosaavn.com/api.php"
         params = {
@@ -100,17 +143,36 @@ def fetch_jiosaavn_songs(query):
             'p': '1',
             'n': '30'
         }
-        res = requests.get(url, params=params, headers=headers, cookies=cookies, timeout=8)
+        res = requests.get(url, params=params, headers=headers, cookies=cookies, timeout=6)
         if res.status_code == 200:
-            data = res.json()
-            results = data.get('results', [])
-            songs = [parse_song_item(item) for item in results if parse_song_item(item)]
+            songs = extract_songs_from_response(res.json())
             if songs:
                 return songs
     except Exception:
         pass
 
-    # 2. Secondary Method: Official JioSaavn autocomplete.get
+    # Strategy 2: Official JioSaavn Android Search
+    try:
+        url = "https://www.jiosaavn.com/api.php"
+        params = {
+            '__call': 'search.getMoreResults',
+            '_format': 'json',
+            '_marker': '0',
+            'api_version': '4',
+            'ctx': 'android',
+            'query': query,
+            'p': '0',
+            'n': '30'
+        }
+        res = requests.get(url, params=params, headers=headers, cookies=cookies, timeout=6)
+        if res.status_code == 200:
+            songs = extract_songs_from_response(res.json())
+            if songs:
+                return songs
+    except Exception:
+        pass
+
+    # Strategy 3: Official JioSaavn Autocomplete
     try:
         url = "https://www.jiosaavn.com/api.php"
         params = {
@@ -121,15 +183,29 @@ def fetch_jiosaavn_songs(query):
             'ctx': 'web6dot0',
             'query': query
         }
-        res = requests.get(url, params=params, headers=headers, cookies=cookies, timeout=8)
+        res = requests.get(url, params=params, headers=headers, cookies=cookies, timeout=6)
         if res.status_code == 200:
-            data = res.json()
-            songs_data = data.get('songs', {}).get('data', []) if isinstance(data.get('songs'), dict) else []
-            songs = [parse_song_item(item) for item in songs_data if parse_song_item(item)]
+            songs = extract_songs_from_response(res.json())
             if songs:
                 return songs
     except Exception:
         pass
+
+    # Strategy 4: Backup Mirror Endpoints
+    mirror_urls = [
+        f"https://jiosaavn-api-v3.vercel.app/search/songs?query={query}",
+        f"https://saavn.me/search/songs?query={query}",
+        f"https://saavn.dev/api/search/songs?query={query}"
+    ]
+    for m_url in mirror_urls:
+        try:
+            res = requests.get(m_url, headers=headers, timeout=5)
+            if res.status_code == 200:
+                songs = extract_songs_from_response(res.json())
+                if songs:
+                    return songs
+        except Exception:
+            continue
 
     return []
 
@@ -147,17 +223,17 @@ def search_songs():
     if not query:
         return jsonify({"status": "error", "message": "Search query missing"}), 400
 
-    songs = fetch_jiosaavn_songs(query)
+    songs = fetch_songs_multi_strategy(query)
     if songs:
         return jsonify({"status": "success", "count": len(songs), "results": songs})
 
-    return jsonify({"status": "error", "message": "No songs found for your query. Please try another search term."}), 404
+    return jsonify({"status": "error", "message": "No songs found."}), 404
 
 @app.route('/artist/top-hits', methods=['GET'])
 def artist_top_hits():
     artist_name = request.args.get('name', 'Arijit Singh')
     
-    songs = fetch_jiosaavn_songs(artist_name)
+    songs = fetch_songs_multi_strategy(artist_name)
     if songs:
         return jsonify({"status": "success", "artist": artist_name, "count": len(songs), "results": songs})
 
