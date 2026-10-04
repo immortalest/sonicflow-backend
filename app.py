@@ -24,6 +24,7 @@ PIPED_INSTANCES = [
 ]
 
 def get_direct_https_stream(video_id):
+    # Fetch fresh direct HTTPS audio stream link on-demand
     for base_url in PIPED_INSTANCES:
         try:
             url = f"{base_url}/streams/{video_id}"
@@ -39,13 +40,14 @@ def get_direct_https_stream(video_id):
         except Exception:
             continue
             
+    # Fallback HTTPS node
     return f"https://invidious.nerdvpn.de/latest_version?id={video_id}&itag=140"
 
 @app.route('/')
 def home():
     return jsonify({
         "status": "online",
-        "app": "SonicFlow Backend Engine v2 (HTTPS Direct Stream)",
+        "app": "SonicFlow Backend Engine v2 (HTTPS On-Demand Stream)",
         "message": "Full-Length HTTPS Audio Engine is running smoothly!"
     })
 
@@ -63,6 +65,8 @@ def search_ytmusic(query):
     if ytmusic:
         try:
             results = ytmusic.search(query, filter="songs", limit=25)
+            host_url = request.host_url.rstrip('/')
+            
             for item in results:
                 vid = item.get("videoId")
                 if not vid:
@@ -84,7 +88,8 @@ def search_ytmusic(query):
 
                 duration = item.get("duration_seconds") or 0
                 
-                stream_link = get_direct_https_stream(vid)
+                # Stream Link generated dynamically on-demand
+                stream_link = f"{host_url}/stream?id={vid}"
                 
                 songs.append({
                     "id": vid,
@@ -113,14 +118,8 @@ def search_songs():
 
 @app.route('/artist/top-hits', methods=['GET'])
 def artist_top_hits():
-    # Fix: Fetch 'name', 'q', or 'query' so it accepts any parameter format
     artist_name = request.args.get('name', '') or request.args.get('q', '') or request.args.get('query', '') or 'Arijit Singh'
-    
-    songs = search_ytmusic(artist_name)
-    if songs:
-        return jsonify({"status": "success", "artist": artist_name, "count": len(songs), "results": songs})
-
-    return jsonify({"status": "error", "message": f"No songs found for artist {artist_name}"}), 404
+    return search_songs()
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)
