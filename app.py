@@ -9,49 +9,49 @@ CORS(app)
 SONGS_DIR = 'songs'
 SONGS_FILE = 'songs_db.json'
 
-# Auto-create songs directory if it doesn't exist
 os.makedirs(SONGS_DIR, exist_ok=True)
 
 def load_songs():
     songs = []
     
-    # 1. Load songs from songs_db.json if present
+    # 1. Safe JSON load
     if os.path.exists(SONGS_FILE):
         try:
             with open(SONGS_FILE, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-                if isinstance(data, list):
-                    songs.extend(data)
+                content = json.load(f)
+                if isinstance(content, list):
+                    songs.extend(content)
         except Exception as e:
-            print("Error loading songs_db.json:", e)
+            print("JSON Load Error:", e)
 
-    # 2. Auto-scan songs/ folder for any direct .mp3 files
+    # 2. Safe directory scan
     if os.path.exists(SONGS_DIR):
-        existing_filenames = [s.get('stream_url', '').split('/')[-1] for s in songs]
-        for idx, filename in enumerate(os.listdir(SONGS_DIR), start=len(songs) + 1):
-            if filename.lower().endswith(('.mp3', '.m4a', '.wav', '.aac')) and filename not in existing_filenames:
-                clean_title = os.path.splitext(filename)[0].replace('_', ' ').replace('-', ' ').title()
-                songs.append({
-                    "id": str(idx),
-                    "title": clean_title,
-                    "artist": "Arijit Singh",
-                    "album": "Single",
-                    "image": "https://upload.wikimedia.org/wikipedia/en/2/2f/Brahmastra_Teaser.jpg",
-                    "stream_url": f"/songs/{filename}",
-                    "duration": 0
-                })
-                
+        existing = [s.get('stream_url', '').split('/')[-1] for s in songs]
+        try:
+            for idx, filename in enumerate(os.listdir(SONGS_DIR), start=len(songs) + 1):
+                if filename.lower().endswith(('.mp3', '.m4a', '.wav')) and filename not in existing:
+                    clean_title = os.path.splitext(filename)[0].replace('_', ' ').replace('-', ' ').title()
+                    songs.append({
+                        "id": str(idx),
+                        "title": clean_title,
+                        "artist": "Arijit Singh",
+                        "album": "Single",
+                        "image": "https://upload.wikimedia.org/wikipedia/en/2/2f/Brahmastra_Teaser.jpg",
+                        "stream_url": f"/songs/{filename}"
+                    })
+        except Exception as e:
+            print("Dir Scan Error:", e)
+            
     return songs
 
 @app.route('/')
 def home():
     return jsonify({
         "status": "online",
-        "app": "BeatPulse / SonicFlow Backend Engine",
-        "message": "Self-hosted music server is active and serving songs!"
+        "app": "BeatPulse Server",
+        "message": "Backend is running!"
     })
 
-# Route to serve MP3 files directly from songs/ directory
 @app.route('/songs/<path:filename>')
 def serve_song(filename):
     return send_from_directory(SONGS_DIR, filename)
@@ -60,29 +60,21 @@ def serve_song(filename):
 def search_songs():
     query = request.args.get('q', '') or request.args.get('query', '')
     all_songs = load_songs()
-    
-    # Prepend full backend host domain to relative /songs/ URLs
     host_url = request.host_url.rstrip('/')
-    formatted_songs = []
+    
+    formatted = []
     for s in all_songs:
-        song_copy = dict(s)
-        url = song_copy.get('stream_url', '')
-        if url.startswith('/'):
-            song_copy['stream_url'] = f"{host_url}{url}"
-        formatted_songs.append(song_copy)
+        sc = dict(s)
+        if sc.get('stream_url', '').startswith('/'):
+            sc['stream_url'] = f"{host_url}{sc['stream_url']}"
+        formatted.append(sc)
 
     if not query:
-        return jsonify({"status": "success", "count": len(formatted_songs), "results": formatted_songs})
+        return jsonify({"status": "success", "count": len(formatted), "results": formatted})
 
     q_lower = query.lower()
-    filtered = [
-        s for s in formatted_songs 
-        if q_lower in s.get('title', '').lower() or 
-           q_lower in s.get('artist', '').lower() or
-           q_lower in s.get('album', '').lower()
-    ]
-
-    return jsonify({"status": "success", "count": len(filtered), "results": filtered if filtered else formatted_songs})
+    filtered = [s for s in formatted if q_lower in s.get('title', '').lower() or q_lower in s.get('artist', '').lower()]
+    return jsonify({"status": "success", "count": len(filtered), "results": filtered if filtered else formatted})
 
 @app.route('/artist/top-hits', methods=['GET'])
 def artist_top_hits():
