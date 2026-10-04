@@ -1,110 +1,163 @@
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 import requests
-import base64
-import time
+import html
+import re
 
 app = Flask(__name__)
 CORS(app)
 
-# 🔑 Spotify Official Developer Credentials
-SPOTIFY_CLIENT_ID = "c6241430aa814093a2225d492bd1552e"
-SPOTIFY_CLIENT_SECRET = "1bf7c71c0c134dd3adae3d57d5484997"
+def clean_text(text):
+    if not text:
+        return ''
+    return html.unescape(re.sub(r'<[^>]+>', '', str(text)))
 
-spotify_token = ""
-token_expires_at = 0
+def get_full_stream_url(item):
+    if not isinstance(item, dict):
+        return ""
+    
+    more_info = item.get('more_info', {}) if isinstance(item.get('more_info'), dict) else {}
+    
+    # 1. Direct Preview URL to Full-Length 320kbps HD Audio Link
+    preview = item.get('media_preview_url') or more_info.get('media_preview_url') or ""
+    if preview and 'saavncdn.com' in preview:
+        url = preview.replace('preview.saavncdn.com', 'aac.saavncdn.com')
+        url = url.replace('_96_p.mp4', '_320.mp4').replace('_96_p.mp3', '_320.mp3')
+        url = url.replace('_96_p', '_320.mp4')
+        return url
 
-def get_spotify_token():
-    global spotify_token, token_expires_at
-    if spotify_token and time.time() < token_expires_at:
-        return spotify_token
+    # 2. Download URL Array (Full Songs)
+    dl = item.get('downloadUrl') or item.get('download_url') or item.get('downloadUrls') or []
+    if isinstance(dl, list) and len(dl) > 0:
+        last = dl[-1]
+        return last.get('url', '') if isinstance(last, dict) else str(last)
+    elif isinstance(dl, str) and dl.startswith('http'):
+        return dl
 
-    url = "https://accounts.spotify.com/api/token"
-    auth_header = base64.b64encode(f"{SPOTIFY_CLIENT_ID}:{SPOTIFY_CLIENT_SECRET}".encode()).decode()
-    headers = {
-        "Authorization": f"Basic {auth_header}",
-        "Content-Type": "application/x-www-form-urlencoded"
-    }
-    data = {"grant_type": "client_credentials"}
+    # 3. Direct Media URL
+    media_url = item.get('media_url') or more_info.get('media_url')
+    if isinstance(media_url, str) and media_url.startswith('http'):
+        return media_url
 
-    try:
-        res = requests.post(url, headers=headers, data=data, timeout=8)
-        if res.status_code == 200:
-            token_data = res.json()
-            spotify_token = token_data.get("access_token")
-            token_expires_at = time.time() + token_data.get("expires_in", 3600) - 60
-            return spotify_token
-    except Exception as e:
-        print("Spotify Token Exception:", e)
-    return None
-
-def get_audio_stream_from_piped(query):
-    piped_instances = [
-        "https://pipedapi.kavin.rocks",
-        "https://api.piped.video",
-        "https://pipedapi.drgns.space",
-        "https://pipedapi.mha.fi",
-        "https://pipedapi.astrobot.me",
-        "https://pipedapi.privacy.com.de"
-    ]
-
-    for base_url in piped_instances:
-        try:
-            search_url = f"{base_url}/search"
-            res = requests.get(search_url, params={"q": query, "filter": "music_songs"}, timeout=4)
-            if res.status_code == 200:
-                items = res.json().get('items', [])
-                if items and isinstance(items, list):
-                    video_id = items[0].get('url', '').replace('/watch?v=', '')
-                    if video_id:
-                        stream_res = requests.get(f"{base_url}/streams/{video_id}", timeout=4)
-                        if stream_res.status_code == 200:
-                            audio_streams = stream_res.json().get('audioStreams', [])
-                            if audio_streams:
-                                return audio_streams[-1].get('url')
-        except Exception:
-            continue
     return ""
 
-def fetch_itunes_fallback(query):
+def parse_song_item(item):
+    if not isinstance(item, dict):
+        return None
+
+    stream_url = get_full_stream_url(item)
+    if not stream_url:
+        return None
+
+    more_info = item.get('more_info', {}) if isinstance(item.get('more_info'), dict) else {}
+
+    # Title Extraction
+    title = clean_text(item.get('title') or item.get('name') or item.get('song') or "Unknown Song")
+
+    # HD Image Extraction (500x500)
+    image_url = ""
+    images = item.get('image') or item.get('images') or []
+    if isinstance(images, list) and len(images) > 0:
+        last_img = images[-1]
+        image_url = last_img.get('url', '') if isinstance(last_img, dict) else str(last_img)
+    elif isinstance(images, str):
+        image_url = images.replace('150x150', '500x500').replace('50x50', '500x500')
+
+    # Artist Extraction
+    artist = ""
+    if 'artistMap' in more_info and isinstance(more_info['artistMap'], dict):
+        prim = more_info['artistMap'].get('primary_artists', [])
+        if prim and isinstance(prim, list):
+            artist = ", ".join([a.get('name', '') for a in prim if isinstance(a, dict) and a.get('name')])
+    if not artist:
+        artists_data = item.get('artists', {})
+        prim = artists_data.get('primary', []) if isinstance(artists_data, dict) else []
+        if prim and isinstance(prim, list):
+            artist = ", ".join([a.get('name', '') for a in prim if isinstance(a, dict) and a.get('name')])
+    if not artist:
+        artist = item.get('primaryArtists') or item.get('artist') or item.get('singers') or item.get('subtitle') or "Unknown Artist"
+
+    album_name = clean_text(more_info.get('album') or (item.get('album', {}).get('name', '') if isinstance(item.get('album'), dict) else str(item.get('album', ''))))
+
+    duration = item.get('duration', 0) or more_info.get('duration', 0)
     try:
-        url = "https://itunes.apple.com/search"
-        params = {"term": query, "entity": "song", "limit": 25, "country": "IN"}
-        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
-        res = requests.get(url, params=params, headers=headers, timeout=8)
+        duration = int(duration)
+    except Exception:
+        duration = 0
+
+    return {
+        "id": str(item.get('id', '')),
+        "title": title,
+        "artist": clean_text(artist),
+        "album": album_name,
+        "image": image_url,
+        "stream_url": stream_url,
+        "duration": duration
+    }
+
+def fetch_full_songs_jiosaavn(query):
+    # Android Mobile Headers (Never blocked by Cloudflare)
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Linux; Android 13; SM-G998B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36',
+        'Accept': 'application/json, text/plain, */*'
+    }
+    cookies = {
+        'L': 'hindi,english,punjabi,telugu,tamil',
+        'gdpr_acceptance': 'true'
+    }
+
+    # Method 1: JioSaavn Android API (search.getResults)
+    try:
+        url = "https://www.jiosaavn.com/api.php"
+        params = {
+            '__call': 'search.getResults',
+            '_format': 'json',
+            '_marker': '0',
+            'api_version': '4',
+            'ctx': 'android',
+            'q': query,
+            'p': '1',
+            'n': '40'
+        }
+        res = requests.get(url, params=params, headers=headers, cookies=cookies, timeout=8)
         if res.status_code == 200:
-            results = res.json().get("results", [])
-            songs = []
-            for item in results:
-                title = item.get("trackName", "Unknown Song")
-                artist = item.get("artistName", "Unknown Artist")
-                image = item.get("artworkUrl100", "").replace("100x100bb.jpg", "600x600bb.jpg")
-                preview_audio = item.get("previewUrl", "")
-                
-                # Try full audio stream via Piped, fallback to official iTunes HD Audio stream
-                stream = get_audio_stream_from_piped(f"{title} {artist} audio") or preview_audio
-                
-                if stream:
-                    songs.append({
-                        "id": str(item.get("trackId", "")),
-                        "title": title,
-                        "artist": artist,
-                        "album": item.get("collectionName", ""),
-                        "image": image,
-                        "stream_url": stream,
-                        "duration": 30
-                    })
-            return songs
-    except Exception as e:
-        print("iTunes Fallback Exception:", e)
+            data = res.json()
+            results = data.get('results', [])
+            songs = [parse_song_item(item) for item in results if parse_song_item(item)]
+            if songs:
+                return songs
+    except Exception:
+        pass
+
+    # Method 2: JioSaavn Android API (autocomplete.get)
+    try:
+        url = "https://www.jiosaavn.com/api.php"
+        params = {
+            '__call': 'autocomplete.get',
+            '_format': 'json',
+            '_marker': '0',
+            'api_version': '4',
+            'ctx': 'android',
+            'query': query
+        }
+        res = requests.get(url, params=params, headers=headers, cookies=cookies, timeout=8)
+        if res.status_code == 200:
+            data = res.json()
+            songs_data = data.get('songs', {}).get('data', []) if isinstance(data.get('songs'), dict) else []
+            songs = [parse_song_item(item) for item in songs_data if parse_song_item(item)]
+            if songs:
+                return songs
+    except Exception:
+        pass
+
     return []
 
 @app.route('/')
 def home():
     return jsonify({
         "status": "online",
-        "app": "SonicFlow Backend v2 (Spotify + iTunes Engine)",
-        "message": "Spotify + iTunes Dual Engine is running smoothly!"
+        "app": "SonicFlow Backend Engine v2 (Full-Length HD Engine)",
+        "message": "Full Length 320kbps HD Audio Engine is running!"
     })
 
 @app.route('/search', methods=['GET'])
@@ -113,56 +166,20 @@ def search_songs():
     if not query:
         return jsonify({"status": "error", "message": "Search query missing"}), 400
 
-    # 1. Primary Engine: Spotify Official Web API
-    token = get_spotify_token()
-    if token:
-        try:
-            url = "https://api.spotify.com/v1/search"
-            headers = {
-                "Authorization": f"Bearer {token}",
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
-            }
-            params = {"q": query, "type": "track", "limit": 20, "market": "IN"}
-            
-            res = requests.get(url, headers=headers, params=params, timeout=8)
-            if res.status_code == 200:
-                data = res.json()
-                tracks = data.get('tracks', {}).get('items', [])
-                songs = []
-                for track in tracks:
-                    title = track.get('name')
-                    artists = ", ".join([a.get('name') for a in track.get('artists', []) if a.get('name')])
-                    images = track.get('album', {}).get('images', [])
-                    image = images[0].get('url') if images else ''
-                    
-                    stream_url = get_audio_stream_from_piped(f"{title} {artists} audio") or track.get('preview_url', '')
+    songs = fetch_full_songs_jiosaavn(query)
+    if songs:
+        return jsonify({"status": "success", "count": len(songs), "results": songs})
 
-                    if stream_url:
-                        songs.append({
-                            "id": track.get('id'),
-                            "title": title,
-                            "artist": artists,
-                            "album": track.get('album', {}).get('name'),
-                            "image": image,
-                            "stream_url": stream_url,
-                            "duration": track.get('duration_ms', 0) // 1000
-                        })
-                if songs:
-                    return jsonify({"status": "success", "source": "spotify", "count": len(songs), "results": songs})
-        except Exception as e:
-            print("Spotify Search Exception:", e)
-
-    # 2. Universal Backup Engine: iTunes Official Engine
-    itunes_songs = fetch_itunes_fallback(query)
-    if itunes_songs:
-        return jsonify({"status": "success", "source": "itunes", "count": len(itunes_songs), "results": itunes_songs})
-
-    return jsonify({"status": "error", "message": "Unable to fetch songs right now. Please try again."}), 500
+    return jsonify({"status": "error", "message": "No full-length songs found for your query."}), 404
 
 @app.route('/artist/top-hits', methods=['GET'])
 def artist_top_hits():
     artist_name = request.args.get('name', 'Arijit Singh')
-    return search_songs()
+    songs = fetch_full_songs_jiosaavn(artist_name)
+    if songs:
+        return jsonify({"status": "success", "artist": artist_name, "count": len(songs), "results": songs})
+
+    return jsonify({"status": "error", "message": f"Unable to fetch full-length songs for {artist_name}"}), 404
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)
