@@ -5,11 +5,12 @@ import requests
 app = Flask(__name__)
 CORS(app)
 
-# Backup API URLs (Agar ek domain down ho toh doosra apne aap try hoga)
-API_BASE_URLS = [
-    "https://saavn.me/api",
-    "https://saavn.dev/api",
-    "https://jiosaavn-api-v3.vercel.app"
+# Direct full API endpoints list (Correct URLs without path bugs)
+SEARCH_ENDPOINTS = [
+    "https://saavn.me/search/songs",
+    "https://jiosaavn-api-v3.vercel.app/search/songs",
+    "https://saavn.dev/api/search/songs",
+    "https://jiosaavn-api.vercel.app/search/songs"
 ]
 
 @app.route('/')
@@ -20,12 +21,11 @@ def home():
         "message": "Server is running smoothly!"
     })
 
-def fetch_jiosaavn(endpoint_path, params):
-    headers = {'User-Agent': 'Mozilla/5.0'}
-    for base_url in API_BASE_URLS:
+def fetch_from_endpoints(params):
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+    for url in SEARCH_ENDPOINTS:
         try:
-            url = f"{base_url}{endpoint_path}"
-            res = requests.get(url, params=params, headers=headers, timeout=6)
+            res = requests.get(url, params=params, headers=headers, timeout=5)
             if res.status_code == 200:
                 data = res.json()
                 if data:
@@ -39,13 +39,15 @@ def parse_song_item(item):
     stream_url = ""
     download_urls = item.get('downloadUrl') or item.get('download_url') or []
     if isinstance(download_urls, list) and len(download_urls) > 0:
-        stream_url = download_urls[-1].get('url') if isinstance(download_urls[-1], dict) else download_urls[-1]
+        last_dl = download_urls[-1]
+        stream_url = last_dl.get('url') if isinstance(last_dl, dict) else last_dl
 
     # Image URL Extraction
     image_url = ""
     images = item.get('image') or []
     if isinstance(images, list) and len(images) > 0:
-        image_url = images[-1].get('url') if isinstance(images[-1], dict) else images[-1]
+        last_img = images[-1]
+        image_url = last_img.get('url') if isinstance(last_img, dict) else last_img
 
     # Artist Name Extraction
     artists_data = item.get('artists', {})
@@ -56,7 +58,7 @@ def parse_song_item(item):
         artist_names = item.get('primaryArtists') or item.get('artist') or "Unknown Artist"
 
     return {
-        "id": item.get('id', ''),
+        "id": str(item.get('id', '')),
         "title": item.get('name') or item.get('title') or "Unknown Song",
         "artist": artist_names,
         "album": item.get('album', {}).get('name', '') if isinstance(item.get('album'), dict) else str(item.get('album', '')),
@@ -71,10 +73,10 @@ def search_songs():
     if not query:
         return jsonify({"status": "error", "message": "Search query missing"}), 400
 
-    data = fetch_jiosaavn("/search/songs", {"query": query, "limit": 30})
+    data = fetch_from_endpoints({"query": query, "limit": 30})
     
     if not data:
-        return jsonify({"status": "error", "message": "All API endpoints are currently unreachable."}), 500
+        return jsonify({"status": "error", "message": "API endpoints currently unreachable. Please try again."}), 500
 
     songs = []
     results = []
@@ -97,10 +99,10 @@ def search_songs():
 def artist_top_hits():
     artist_name = request.args.get('name', 'Arijit Singh')
     
-    data = fetch_jiosaavn("/search/songs", {"query": artist_name, "limit": 30})
+    data = fetch_from_endpoints({"query": artist_name, "limit": 30})
     
     if not data:
-        return jsonify({"status": "error", "message": "All API endpoints are currently unreachable."}), 500
+        return jsonify({"status": "error", "message": "API endpoints currently unreachable. Please try again."}), 500
 
     songs = []
     results = []
